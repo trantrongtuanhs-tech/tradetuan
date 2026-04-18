@@ -1,0 +1,6 @@
+python-telegram-bot==20.7
+ccxt==4.2.25
+pandas==2.1.4
+numpy==1.26.4
+APScheduler==3.10.4
+python-dotenv==1.0.0
