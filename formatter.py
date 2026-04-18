@@ -1,5 +1,6 @@
 """
 formatter.py — Format scan results into Telegram messages (Vietnamese UI)
+Updated: hiển thị age_tag nếu signal đến từ nến trước
 """
 
 from datetime import datetime
@@ -31,7 +32,6 @@ def _now_vn() -> str:
 
 
 def _price_fmt(p: float) -> str:
-    """Auto format price: many decimals for low-priced coins."""
     if p >= 1000:
         return f"{p:,.2f}"
     if p >= 1:
@@ -39,24 +39,17 @@ def _price_fmt(p: float) -> str:
     return f"{p:.6f}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Summary line (used in scan-summary message)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def format_summary_line(r: dict) -> str:
     emoji = SIGNAL_EMOJI.get(r["signal"], "📊")
     v_emoji = VERDICT_EMOJI.get(r["sqz_verdict"], "")
     confirmed = "✅" if "CONFIRMED" in r["signal"] else "⚠️"
+    age_tag = r.get("age_tag", "")
     return (
-        f"{emoji} `{r['symbol']}` {confirmed} {r['signal']}\n"
+        f"{emoji} `{r['symbol']}` {confirmed} {r['signal']}{age_tag}\n"
         f"   💰 {_price_fmt(r['price'])}  |  RSI {r['rsi']}  |  ADX {r['adx']}"
         f"{'⚡' if r['adx_strong'] else ''}  |  SQZ {v_emoji} {r['sqz_verdict']}\n"
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Full detail card per signal
-# ─────────────────────────────────────────────────────────────────────────────
 
 def format_signal_card(r: dict) -> str:
     emoji   = SIGNAL_EMOJI.get(r["signal"], "📊")
@@ -64,12 +57,12 @@ def format_signal_card(r: dict) -> str:
     sqz_dir = "▲ BULL" if r["sqz_bull"] else "▼ BEAR"
     sqz_arr = "↑ rising" if r["sqz_rising"] else "↓ falling"
     v_emoji = VERDICT_EMOJI.get(r["sqz_verdict"], "")
+    age_tag = r.get("age_tag", "")
 
     rr = round(abs(r["tp"] - r["entry"]) / max(abs(r["entry"] - r["sl"]), 1e-9), 1)
 
-    be_tag = ""
     lines = [
-        f"{emoji} *{r['signal']}*  —  `{r['symbol']}`",
+        f"{emoji} *{r['signal']}*{age_tag}  —  `{r['symbol']}`",
         f"━━━━━━━━━━━━━━━━━━━━━━━",
         f"💰 Giá:      `{_price_fmt(r['price'])}`",
         f"📏 SMA 25:   `{_price_fmt(r['sma25'])}`",
@@ -102,10 +95,6 @@ def format_signal_card(r: dict) -> str:
     ]
     return "\n".join(lines)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Scan summary header
-# ─────────────────────────────────────────────────────────────────────────────
 
 def format_scan_header(results: list[dict], total_symbols: int, interval_min: int) -> str:
     confirmed = sum(1 for r in results if "CONFIRMED" in r["signal"])
