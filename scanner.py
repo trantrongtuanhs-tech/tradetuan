@@ -4,6 +4,11 @@ Logic mirrors Pine Script: SMA25 + Smart Trail Bot [Enhanced v4 - Tuan]
 
 Extended: auto-fetch top N tokens by 24h USDT volume.
 Concurrent scanning via semaphore to handle 500 symbols efficiently.
+
+FIXES:
+  1. base_buy/base_sell: giờ cho phép signal còn hiệu lực trong N_SIGNAL_BARS nến
+  2. s2_sell: fix logic điều kiện (not trend_up AND not above_200)
+  3. Smart trail: init từ nến đầu tiên có ATR hợp lệ thay vì nến [0]
 """
 
 import asyncio
@@ -50,6 +55,9 @@ CFG = dict(
     sl_atr_mult  = 1.0,
     rr_ratio     = 2.0,
     bars_needed  = 300,
+    # FIX 1: số nến tối đa sau crossover vẫn còn hiệu lực signal
+    # 3 = signal còn sống trong 3 nến 1H (3 giờ) sau khi crossover xảy ra
+    signal_lookback = 3,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,10 +89,6 @@ def get_top_symbols(
     top_n: int = 500,
     min_volume_usdt: float = 500_000,
 ) -> list:
-    """
-    Single fetch_tickers() call → rank all USDT pairs by 24h quoteVolume
-    → return top_n symbols.
-    """
     logger.info(f"Fetching tickers to build top-{top_n} {quote} list…")
     try:
         tickers = exchange.fetch_tickers()
@@ -145,6 +149,39 @@ def _overall(bc, sc):
     return "⚖ NEUTRAL"
 
 
+def _detect_recent_crossover(
+    sma_sig_arr: np.ndarray,
+    trail_sig_arr: np.ndarray,
+    lookback: int,
+) -> tuple[bool, bool, int]:
+    """
+    FIX 1: Tìm crossover trong `lookback` nến gần nhất.
+    Trả về (base_buy, base_sell, bars_ago) — bars_ago=0 nghĩa là nến hiện tại.
+    """
+    base_buy = base_sell = False
+    bars_ago = -1
+
+    for i in range(lookback):
+        idx_cur  = -(1 + i)
+        idx_prev = -(2 + i)
+
+        bull_cur  = sma_sig_arr[idx_cur]  > 0 and trail_sig_arr[idx_cur]  > 0
+        bear_cur  = sma_sig_arr[idx_cur]  < 0 and trail_sig_arr[idx_cur]  < 0
+        bull_prev = sma_sig_arr[idx_prev] > 0 and trail_sig_arr[idx_prev] > 0
+        bear_prev = sma_sig_arr[idx_prev] < 0 and trail_sig_arr[idx_prev] < 0
+
+        if bull_cur and not bull_prev:
+            base_buy = True
+            bars_ago = i
+            break
+        if bear_cur and not bear_prev:
+            base_sell = True
+            bars_ago = i
+            break
+
+    return base_buy, base_sell, bars_ago
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Single-symbol analysis
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,14 +199,12 @@ def analyze_symbol(exchange: ccxt.Exchange, symbol: str) -> Optional[dict]:
         h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
 
         # SMA 25
-        sma25     = calc_sma(c, CFG["sma_len"])
-        sma_sig   = 1 if c.iloc[-1] >= sma25.iloc[-1] else -1
-        sma_sig_p = 1 if c.iloc[-2] >= sma25.iloc[-2] else -1
+        sma25 = calc_sma(c, CFG["sma_len"])
+        sma_sig_arr = np.where(c.values >= sma25.values, 1, -1)
 
         # Smart Trail
         trail_v, trail_d = calc_smart_trail(c, h, l, CFG["atr_len"], CFG["atr_mult"])
-        trail_sig   = int(trail_d.iloc[-1])
-        trail_sig_p = int(trail_d.iloc[-2])
+        trail_sig_arr = trail_d.values.astype(int)
 
         # ATR
         atr_1h = float(calc_atr(h, l, c, CFG["atr_len"]).iloc[-1])
@@ -184,13 +219,17 @@ def analyze_symbol(exchange: ccxt.Exchange, symbol: str) -> Optional[dict]:
         rsi_buy_ok  = rsi_cur < CFG["rsi_ob"]
         rsi_sell_ok = rsi_cur > CFG["rsi_os"]
 
-        # Confluence
-        bull      = sma_sig > 0 and trail_sig > 0
-        bear      = sma_sig < 0 and trail_sig < 0
-        prev_bull = sma_sig_p > 0 and trail_sig_p > 0
-        prev_bear = sma_sig_p < 0 and trail_sig_p < 0
-        base_buy  = bull and not prev_bull
-        base_sell = bear and not prev_bear
+        # FIX 1: Tìm crossover trong lookback nến
+        lookback = CFG["signal_lookback"]
+        base_buy, base_sell, bars_ago = _detect_recent_crossover(
+            sma_sig_arr, trail_sig_arr, lookback
+        )
+
+        # Current state (dùng cho display và S2)
+        trail_sig = int(trail_sig_arr[-1])
+        sma_sig   = int(sma_sig_arr[-1])
+        bull = sma_sig > 0 and trail_sig > 0
+        bear = sma_sig < 0 and trail_sig < 0
 
         # EMA trend
         ema_f     = calc_ema(c, CFG["ema_fast"])
@@ -229,10 +268,12 @@ def analyze_symbol(exchange: ccxt.Exchange, symbol: str) -> Optional[dict]:
         sqz_rc = bool(sqz_rise.iloc[-1])
         sqz_oc = bool(sqz_on.iloc[-1])
 
-        # S2 confirm
+        # FIX 2: s2_sell — yêu cầu CẢ trend_down VÀ below_200 (thay vì OR)
+        # Trước: (not trend_up or not above_200) → quá dễ True, lọc ra tất cả
+        # Sau:  (not trend_up and not above_200) → bear market thực sự
         s2_buy  = sqz_bc and (trend_up or above_200) and (rsi_ema_bull or macd_bull)
         s2_sell = (not sqz_bc
-                   and (not trend_up or not above_200)
+                   and (not trend_up and not above_200)   # ← FIX: AND thay vì OR
                    and (rsi_ema_bear or macd_bear))
 
         final_buy  = base_buy  and vol_ok and rsi_buy_ok  and s2_buy
@@ -263,9 +304,13 @@ def analyze_symbol(exchange: ccxt.Exchange, symbol: str) -> Optional[dict]:
         bc = (1 if bull else 0) + (1 if sqz_bc and trend_up else 0) + (1 if macd_bull else 0)
         sc = (1 if bear else 0) + (1 if not sqz_bc and not trend_up else 0) + (1 if macd_bear else 0)
 
+        # Tag thêm nếu signal đến từ nến trước (không phải nến hiện tại)
+        age_tag = f" [+{bars_ago}h]" if bars_ago > 0 else ""
+
         return {
             "symbol":      symbol,
             "signal":      signal,
+            "signal_age":  bars_ago,   # số nến trước crossover xảy ra
             "price":       entry,
             "sma25":       float(sma25.iloc[-1]),
             "trail_price": float(trail_v.iloc[-1]),
@@ -289,6 +334,7 @@ def analyze_symbol(exchange: ccxt.Exchange, symbol: str) -> Optional[dict]:
             "overall":     _overall(bc, sc),
             "cb":          cb,
             "cs":          cs,
+            "age_tag":     age_tag,
         }
 
     except ccxt.NetworkError as e:
@@ -310,10 +356,6 @@ async def scan_symbols_async(
     concurrency: int = 8,
     progress_cb=None,
 ) -> list:
-    """
-    Scan all symbols concurrently (max `concurrency` simultaneous requests).
-    500 symbols @ 8 concurrent ≈ 2–4 minutes depending on latency.
-    """
     semaphore  = asyncio.Semaphore(concurrency)
     results    = []
     done_count = 0
@@ -335,5 +377,5 @@ async def scan_symbols_async(
     await asyncio.gather(*[_worker(s) for s in symbols])
 
     priority = {"CONFIRMED BUY": 0, "CONFIRMED SELL": 1, "WEAK BUY": 2, "WEAK SELL": 3}
-    results.sort(key=lambda x: priority.get(x["signal"], 99))
+    results.sort(key=lambda x: (priority.get(x["signal"], 99), x.get("signal_age", 0)))
     return results
