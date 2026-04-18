@@ -1,6 +1,9 @@
 """
 indicators.py — Technical indicator calculations
 Matches Pine Script: SMA25 + Smart Trail Bot [Enhanced v4 - Tuan]
+
+FIX 3: calc_smart_trail — khởi tạo từ nến đầu tiên có ATR hợp lệ
+        thay vì luôn bắt đầu từ closes[0] với d=1 (giả định BULL sai)
 """
 
 import numpy as np
@@ -41,6 +44,7 @@ def calc_rsi(close: pd.Series, length: int) -> pd.Series:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Smart Trail (ATR Trailing Stop) — matches Pine f_trail()
+# FIX 3: khởi tạo đúng từ nến có ATR hợp lệ đầu tiên
 # ─────────────────────────────────────────────────────────────────────────────
 
 def calc_smart_trail(
@@ -59,8 +63,22 @@ def calc_smart_trail(
     trail     = np.full(len(closes), np.nan)
     direction = np.zeros(len(closes), dtype=int)
 
-    t = float(closes[0])
-    d = 1
+    # FIX 3: tìm index đầu tiên có dữ liệu ATR hợp lệ để khởi tạo
+    init_idx = 0
+    for i in range(len(closes)):
+        if not np.isnan(closes[i]) and not np.isnan(stops[i]):
+            init_idx = i
+            break
+
+    # Khởi tạo tại nến đầu tiên có ATR hợp lệ
+    t = float(closes[init_idx])
+    # Xác định hướng ban đầu dựa vào SMA nhanh: nếu giá > trail_init → BULL
+    # Dùng trung bình 5 nến trước đó nếu có, không thì mặc định BULL
+    if init_idx >= 5:
+        avg_prev = float(np.mean(closes[max(0, init_idx-5):init_idx]))
+        d = 1 if closes[init_idx] >= avg_prev else -1
+    else:
+        d = 1
 
     for i in range(len(closes)):
         c = closes[i]
@@ -102,7 +120,7 @@ def calc_squeeze_momentum(
 
     # Keltner Channels (simple range, matching Pine Script)
     kc_ma     = calc_sma(close, kc_len)
-    rng       = high - low                       # Pine: high-low (not TR)
+    rng       = high - low
     range_ma  = calc_sma(rng, kc_len)
     upper_kc  = kc_ma + range_ma * kc_mult
     lower_kc  = kc_ma - range_ma * kc_mult
